@@ -275,9 +275,13 @@ class MoeLayer(nn.Module):
         """
         # pdb.set_trace()
         batch_size, seq_length, hidden_dim = inputs.shape
-        num_tokens = batch_size * seq_length
+        original_num_tokens = batch_size * seq_length
 
-        num_groups = _num_groups(num_tokens, self.max_group_size, self.num_experts)
+        num_groups, padded_num_tokens = _num_groups_with_padding(
+            original_num_tokens, self.max_group_size, self.num_experts
+        )
+        pad_tokens = padded_num_tokens - original_num_tokens
+        num_tokens = padded_num_tokens
         tokens_per_group = num_tokens // num_groups
 
         if enable_dropout:  # Training
@@ -289,9 +293,13 @@ class MoeLayer(nn.Module):
             round(capacity_factor * tokens_per_group / self.num_experts))
         expert_capacity = max(expert_capacity, self.min_expert_capacity)
 
-        # Reshape batch and sequence/token dimensions for expert routing.
-        token_inputs = jnp.reshape(inputs,
-                                (num_groups, tokens_per_group, hidden_dim))
+        # Reshape batch and sequence/token dimensions for expert routing. The
+        # MoE all-to-all path requires a group count divisible by num_experts;
+        # batch-1 inference can otherwise have an indivisible token count.
+        flat_inputs = jnp.reshape(inputs, (original_num_tokens, hidden_dim))
+        if pad_tokens:
+            flat_inputs = jnp.pad(flat_inputs, ((0, pad_tokens), (0, 0)))
+        token_inputs = jnp.reshape(flat_inputs, (num_groups, tokens_per_group, hidden_dim))
 
         # pdb.set_trace()
         if isinstance(self.router, routing.ScatterRouter):
@@ -315,7 +323,10 @@ class MoeLayer(nn.Module):
             raise ValueError(f'Unrecognized router type: {self.router}')
 
         # Return to original input shape.
-        result = outputs.reshape((batch_size, seq_length, hidden_dim))
+        result = outputs.reshape((num_tokens, hidden_dim))
+        if pad_tokens:
+            result = result[:original_num_tokens]
+        result = result.reshape((batch_size, seq_length, hidden_dim))
         return result
 
     def _scatter_to_experts(self, token_inputs: Array, enable_dropout: bool,
@@ -678,7 +689,7 @@ def _num_groups(num_tokens: int, max_group_size: int, num_experts: int) -> int:
     while num_groups < num_tokens and not viable(num_groups):
         num_groups += 1
 
-    if num_tokens % num_groups > 0:
+    if num_tokens % num_groups > 0 or num_groups % num_experts > 0:
         raise ValueError(
             'Group size and the number of experts must divide evenly into the '
             f'global number of tokens, but num_tokens={num_tokens}, while '
@@ -692,6 +703,16 @@ def _num_groups(num_tokens: int, max_group_size: int, num_experts: int) -> int:
     #     num_tokens, max_group_size, num_experts)
 
     return num_groups
+
+
+def _num_groups_with_padding(num_tokens: int, max_group_size: int, num_experts: int) -> tuple[int, int]:
+    """Returns a viable group count and token count, padding if necessary."""
+    padded_num_tokens = num_tokens
+    while True:
+        try:
+            return _num_groups(padded_num_tokens, max_group_size, num_experts), padded_num_tokens
+        except ValueError:
+            padded_num_tokens += 1
 
 
 class LIMoEBlock(nn.Module):

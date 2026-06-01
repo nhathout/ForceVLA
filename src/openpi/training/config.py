@@ -64,8 +64,8 @@ class AssetsConfig:
 
 @dataclasses.dataclass(frozen=True)
 class DataConfig:
-    # LeRobot repo id. If None, fake data will be created.
-    repo_id: str | None = None
+    # LeRobot repo id(s). If None, fake data will be created.
+    repo_id: str | Sequence[str] | None = None
     # Directory within the assets directory containing the data assets.
     asset_id: str | None = None
     # Contains precomputed normalization stats. If None, normalization will not be performed.
@@ -153,7 +153,7 @@ class ModelTransformFactory(GroupFactory):
 @dataclasses.dataclass(frozen=True)
 class DataConfigFactory(abc.ABC):
     # The LeRobot repo id.
-    repo_id: str = tyro.MISSING
+    repo_id: str | Sequence[str] = tyro.MISSING
     # Determines how the assets will be loaded.
     assets: AssetsConfig = dataclasses.field(default_factory=AssetsConfig)
     # Base config that will be updated by the factory.
@@ -166,6 +166,8 @@ class DataConfigFactory(abc.ABC):
     def create_base_config(self, assets_dirs: pathlib.Path) -> DataConfig:
         repo_id = self.repo_id if self.repo_id is not tyro.MISSING else None
         asset_id = self.assets.asset_id or repo_id
+        if not isinstance(asset_id, (str, type(None))):
+            raise ValueError("Multi-dataset configs must provide assets.asset_id.")
         return dataclasses.replace(
             self.base_config or DataConfig(),
             repo_id=repo_id,
@@ -569,6 +571,41 @@ class TrainConfig:
             raise ValueError("Cannot resume and overwrite at the same time.")
 
 
+FORCEVLA_INPUT_FORCE_REPO_IDS = (
+    "flexiv_1plug_insert_inputForce",
+    "flexiv_insert_USB_inputForce",
+    "flexiv_peel_cucumber_inputForce",
+    "flexiv_pump_1bottle_inputForce",
+    "flexiv_wipe_board_inputForce",
+)
+
+
+def _forcevla_lora_config(
+    *,
+    name: str,
+    repo_id: str | Sequence[str],
+    asset_id: str | None = None,
+    num_train_steps: int,
+    batch_size: int = 4,
+) -> TrainConfig:
+    return TrainConfig(
+        name=name,
+        model=pi0_force.Pi0_GuidanceConfig(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
+        data=LeRobotForcevlaDataConfig(
+            repo_id=repo_id,
+            assets=AssetsConfig(asset_id=asset_id),
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.Pi0GuidanceWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=num_train_steps,
+        freeze_filter=pi0_force.Pi0_GuidanceConfig(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        batch_size=batch_size,
+    )
+
+
 # Use `get_config` if you need to get a config by name in your code.
 _CONFIGS = [
     #
@@ -807,21 +844,42 @@ _CONFIGS = [
         num_train_steps=20_000,
     ),
 
-    TrainConfig(
+    _forcevla_lora_config(
         name="forcevla_lora",
-        model=pi0_force.Pi0_GuidanceConfig(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
-        data=LeRobotForcevlaDataConfig(
-            repo_id="flexiv_peel_cucumber_inputForce",
-            base_config=DataConfig(prompt_from_task=True),
-        ),
-        weight_loader=weight_loaders.Pi0GuidanceWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
-        # weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        repo_id="flexiv_peel_cucumber_inputForce",
         num_train_steps=50_000,
-        freeze_filter=pi0_force.Pi0_GuidanceConfig(
-            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
-        ).get_freeze_filter(),
-        ema_decay=None,
-        batch_size=4,
+    ),
+    _forcevla_lora_config(
+        name="forcevla_lora_peel_cucumber",
+        repo_id="flexiv_peel_cucumber_inputForce",
+        num_train_steps=10_000,
+    ),
+    _forcevla_lora_config(
+        name="forcevla_lora_plug_insert",
+        repo_id="flexiv_1plug_insert_inputForce",
+        num_train_steps=10_000,
+    ),
+    _forcevla_lora_config(
+        name="forcevla_lora_insert_usb",
+        repo_id="flexiv_insert_USB_inputForce",
+        num_train_steps=10_000,
+    ),
+    _forcevla_lora_config(
+        name="forcevla_lora_pump_bottle",
+        repo_id="flexiv_pump_1bottle_inputForce",
+        num_train_steps=10_000,
+    ),
+    _forcevla_lora_config(
+        name="forcevla_lora_wipe_board",
+        repo_id="flexiv_wipe_board_inputForce",
+        num_train_steps=10_000,
+    ),
+    _forcevla_lora_config(
+        name="forcevla_lora_all_input_force",
+        repo_id=FORCEVLA_INPUT_FORCE_REPO_IDS,
+        asset_id="forcevla_all_input_force",
+        num_train_steps=30_000,
+        batch_size=16,
     ),
     #
     # Debugging configs.

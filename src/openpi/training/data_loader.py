@@ -136,16 +136,39 @@ def create_torch_dataset(
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
-    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
-    dataset = lerobot_dataset.LeRobotDataset(
-        data_config.repo_id,
-        delta_timestamps={
-            key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
-        },
+    if isinstance(repo_id, str):
+        dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+        dataset = lerobot_dataset.LeRobotDataset(
+            repo_id,
+            delta_timestamps={
+                key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
+            },
+        )
+
+        if data_config.prompt_from_task:
+            dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
+
+        return dataset
+
+    repo_ids = list(repo_id)
+    if not repo_ids:
+        raise ValueError("At least one Repo ID is required for a multi-dataset config.")
+
+    dataset_metas = [lerobot_dataset.LeRobotDatasetMetadata(repo_id) for repo_id in repo_ids]
+    fps = dataset_metas[0].fps
+    if any(meta.fps != fps for meta in dataset_metas):
+        raise ValueError(f"All multi-task datasets must use the same FPS. Got {[meta.fps for meta in dataset_metas]}")
+
+    dataset = lerobot_dataset.MultiLeRobotDataset(
+        repo_ids,
+        delta_timestamps={key: [t / fps for t in range(action_horizon)] for key in data_config.action_sequence_keys},
     )
 
     if data_config.prompt_from_task:
-        dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
+        dataset = TransformedDataset(
+            dataset,
+            [_transforms.PromptFromLeRobotMultiTask([dataset_meta.tasks for dataset_meta in dataset_metas])],
+        )
 
     return dataset
 

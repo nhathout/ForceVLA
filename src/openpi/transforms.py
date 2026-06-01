@@ -310,6 +310,32 @@ class PromptFromLeRobotTask(DataTransformFn):
         return {**data, "prompt": prompt}
 
 
+@dataclasses.dataclass(frozen=True)
+class PromptFromLeRobotMultiTask(DataTransformFn):
+    """Extracts a prompt from a MultiLeRobotDataset sample."""
+
+    # One task mapping per dataset, ordered like the MultiLeRobotDataset repo_ids.
+    tasks_by_dataset: Sequence[dict[int, str]]
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if "dataset_index" not in data:
+            raise ValueError('Cannot extract multi-task prompt without "dataset_index"')
+        if "task_index" not in data:
+            raise ValueError('Cannot extract multi-task prompt without "task_index"')
+
+        dataset_index = int(data["dataset_index"])
+        task_index = int(data["task_index"])
+        try:
+            tasks = self.tasks_by_dataset[dataset_index]
+        except IndexError as exc:
+            raise ValueError(f"{dataset_index=} not found in task mappings.") from exc
+
+        if (prompt := tasks.get(task_index)) is None:
+            raise ValueError(f"{task_index=} not found in task mapping for {dataset_index=}: {tasks}")
+
+        return {**data, "prompt": prompt}
+
+
 def flatten_dict(tree: at.PyTree) -> dict:
     """Flatten a nested dictionary. Uses '/' as the separator."""
     return traverse_util.flatten_dict(tree, sep="/")

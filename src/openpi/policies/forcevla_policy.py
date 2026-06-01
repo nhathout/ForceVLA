@@ -8,7 +8,7 @@ from openpi.models import model as _model
 def make_forcevla_example() -> dict:
     """Creates a random input example compatible with Flexiv config."""
     return {
-        "state": np.ones((14,)),  # observation.state, 7 ee pose, 1 gripper, 6 force
+        "state": np.ones((13,), dtype=np.float32),  # 7 proprio dims + 6 force dims
         "image": np.random.randint(256, size=(480, 640, 3), dtype=np.uint8), 
         "wrist_image": np.random.randint(256, size=(480, 640, 3), dtype=np.uint8), 
         "prompt": "do something",

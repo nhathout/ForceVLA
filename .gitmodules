@@ -1,3 +1,9 @@
+[submodule "dlimp"]
+	path = dlimp
+	url = https://github.com/kvablack/dlimp.git
+[submodule "lerobot"]
+	path = lerobot
+	url = https://github.com/huggingface/lerobot.git
 [submodule "third_party/aloha"]
 	path = third_party/aloha
 	url = https://github.com/Physical-Intelligence/aloha.git

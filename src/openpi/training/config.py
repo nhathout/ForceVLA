@@ -1,7 +1,7 @@
 """See _CONFIGS for the list of available configs."""
 
 import abc
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import dataclasses
 import difflib
 import logging
@@ -90,6 +90,11 @@ class DataConfig:
 
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
+
+    # Optional per-dataset episode holdout: {repo_id: [episode_index, ...]} to EXCLUDE from training
+    # (e.g. the episodes the offline eval scores). None loads every episode. The data loader logs the
+    # exclusion. Norm stats are unaffected unless compute_norm_stats is run with this same config.
+    holdout_episodes: Mapping[str, Sequence[int]] | None = None
 
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
@@ -415,6 +420,8 @@ class LeRobotForcevlaDataConfig(DataConfigFactory):
     """
     # Action keys that will be used to read the action sequence from the dataset.
     action_sequence_keys: Sequence[str] = ("action",)
+    # Optional per-dataset episode holdout {repo_id: [episode_index, ...]} excluded from training.
+    holdout_episodes: Mapping[str, Sequence[int]] | None = None
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -481,6 +488,7 @@ class LeRobotForcevlaDataConfig(DataConfigFactory):
             data_transforms=data_transforms,
             model_transforms=model_transforms,
             action_sequence_keys=self.action_sequence_keys,
+            holdout_episodes=self.holdout_episodes,
         )
 
 @dataclasses.dataclass(frozen=True)
@@ -579,6 +587,18 @@ FORCEVLA_INPUT_FORCE_REPO_IDS = (
     "flexiv_wipe_board_inputForce",
 )
 
+# Held-out episodes per task = the last 2 episode indices of each dataset, i.e. exactly the
+# episodes that scripts/eval/eval_offline_action_error.py scores with its default --n-holdout 2.
+# Excluding these from training turns the offline eval into a genuine held-out generalization
+# probe. Indices are fixed/explicit (not computed) so the holdout set is documented and stable.
+FORCEVLA_HOLDOUT2_EPISODES = {
+    "flexiv_1plug_insert_inputForce": [49, 50],   # total 51
+    "flexiv_insert_USB_inputForce": [48, 49],     # total 50
+    "flexiv_peel_cucumber_inputForce": [41, 42],  # total 43
+    "flexiv_pump_1bottle_inputForce": [48, 49],   # total 50
+    "flexiv_wipe_board_inputForce": [48, 49],     # total 50
+}
+
 
 def _forcevla_lora_config(
     *,
@@ -587,14 +607,17 @@ def _forcevla_lora_config(
     asset_id: str | None = None,
     num_train_steps: int,
     batch_size: int = 4,
+    assets_dir: str | None = None,
+    holdout_episodes: Mapping[str, Sequence[int]] | None = None,
 ) -> TrainConfig:
     return TrainConfig(
         name=name,
         model=pi0_force.Pi0_GuidanceConfig(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
         data=LeRobotForcevlaDataConfig(
             repo_id=repo_id,
-            assets=AssetsConfig(asset_id=asset_id),
+            assets=AssetsConfig(assets_dir=assets_dir, asset_id=asset_id),
             base_config=DataConfig(prompt_from_task=True),
+            holdout_episodes=holdout_episodes,
         ),
         weight_loader=weight_loaders.Pi0GuidanceWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=num_train_steps,
@@ -880,6 +903,19 @@ _CONFIGS = [
         asset_id="forcevla_all_input_force",
         num_train_steps=30_000,
         batch_size=16,
+    ),
+    # Held-out variant of forcevla_lora_all_input_force: identical model/data/hparams, but the last
+    # 2 episodes of each task are excluded from training (FORCEVLA_HOLDOUT2_EPISODES). Reuses the
+    # baseline's norm stats (assets_dir override -> the all_input_force asset) so the only difference
+    # vs the baseline is the training data, isolating the held-out effect. Run from CWD=ForceVLA dir.
+    _forcevla_lora_config(
+        name="forcevla_lora_all_input_force_holdout2",
+        repo_id=FORCEVLA_INPUT_FORCE_REPO_IDS,
+        assets_dir="assets/forcevla_lora_all_input_force",
+        asset_id="forcevla_all_input_force",
+        num_train_steps=30_000,
+        batch_size=16,
+        holdout_episodes=FORCEVLA_HOLDOUT2_EPISODES,
     ),
     #
     # Debugging configs.

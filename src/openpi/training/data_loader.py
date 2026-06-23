@@ -126,6 +126,20 @@ class FakeDataset(Dataset):
         return self._num_samples
 
 
+def _train_episodes(repo_id: str, total_episodes: int, holdout: typing.Mapping[str, typing.Sequence[int]]) -> list[int]:
+    """Episode indices to TRAIN on = all episodes minus the configured holdout for this repo.
+
+    The exclusion is made explicit and logged so a held-out run is auditable from the train log.
+    """
+    excluded = sorted({int(e) for e in holdout.get(repo_id, [])})
+    bad = [e for e in excluded if e < 0 or e >= total_episodes]
+    if bad:
+        raise ValueError(f"holdout episodes {bad} out of range for {repo_id!r} (total={total_episodes}).")
+    kept = [e for e in range(total_episodes) if e not in set(excluded)]
+    print(f"[holdout] {repo_id}: total={total_episodes} excluded={excluded} kept={len(kept)} episodes")
+    return kept
+
+
 def create_torch_dataset(
     data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
 ) -> Dataset:
@@ -136,10 +150,16 @@ def create_torch_dataset(
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
+    # Optional per-repo episode holdout (exclude eval episodes from training). Keyed by repo_id;
+    # None/empty preserves the original behavior of loading every episode.
+    holdout = data_config.holdout_episodes or {}
+
     if isinstance(repo_id, str):
         dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+        episodes = _train_episodes(repo_id, dataset_meta.total_episodes, holdout) if holdout else None
         dataset = lerobot_dataset.LeRobotDataset(
             repo_id,
+            episodes=episodes,
             delta_timestamps={
                 key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
             },
@@ -159,8 +179,17 @@ def create_torch_dataset(
     if any(meta.fps != fps for meta in dataset_metas):
         raise ValueError(f"All multi-task datasets must use the same FPS. Got {[meta.fps for meta in dataset_metas]}")
 
+    # MultiLeRobotDataset.episodes is a dict keyed by EVERY repo_id (missing keys raise KeyError),
+    # so when holding out we pass an explicit kept-list for every dataset.
+    episodes = (
+        {r: _train_episodes(r, m.total_episodes, holdout) for r, m in zip(repo_ids, dataset_metas)}
+        if holdout
+        else None
+    )
+
     dataset = lerobot_dataset.MultiLeRobotDataset(
         repo_ids,
+        episodes=episodes,
         delta_timestamps={key: [t / fps for t in range(action_horizon)] for key in data_config.action_sequence_keys},
     )
 

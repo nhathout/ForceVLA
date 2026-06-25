@@ -25,6 +25,7 @@ import jax
 import jax.numpy as jnp
 
 import openpi.shared.array_typing as at
+import openpi.models.moe_routing_capture as _routing_capture
 
 
 from flaxformer.architectures.moe import routing
@@ -307,10 +308,11 @@ class MoeLayer(nn.Module):
                 token_inputs,
                 enable_dropout,
                 expert_capacity,
+                capture_meta=(batch_size, seq_length),
                 decode=decode,
                 prefill=prefill,
                 prefill_lengths=prefill_lengths)
-            
+
         elif isinstance(self.router, routing.MaskedRouter):
             outputs = self._mask_and_dispatch_to_experts(
                 token_inputs,
@@ -330,7 +332,7 @@ class MoeLayer(nn.Module):
         return result
 
     def _scatter_to_experts(self, token_inputs: Array, enable_dropout: bool,
-                            expert_capacity: int, **kwargs) -> Array:
+                            expert_capacity: int, capture_meta=None, **kwargs) -> Array:
         """Wraps expert scatter routing and dispatching algorithm.
 
         This algorithm takes the following steps:
@@ -357,6 +359,13 @@ class MoeLayer(nn.Module):
             self.num_experts,
             expert_capacity,
             apply_jitter=enable_dropout)
+
+        # Non-invasive routing capture. No-op (untraced) unless explicitly enabled, so
+        # normal inference is byte-identical. See openpi.models.moe_routing_capture.
+        if _routing_capture.ENABLED and capture_meta is not None:
+            _routing_capture.emit(
+                router_indices.dispatch_indices, router_indices.combine_weights, *capture_meta)
+
         num_selected_experts = self.router.num_selected_experts
 
         # We need num_selected_experts copies of inputs for dispatching. This is a

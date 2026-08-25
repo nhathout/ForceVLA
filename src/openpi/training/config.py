@@ -422,6 +422,14 @@ class LeRobotForcevlaDataConfig(DataConfigFactory):
     action_sequence_keys: Sequence[str] = ("action",)
     # Optional per-dataset episode holdout {repo_id: [episode_index, ...]} excluded from training.
     holdout_episodes: Mapping[str, Sequence[int]] | None = None
+    # {model key: dataset key} for the repack step. The default below is the
+    # layout of the Flexiv ForceVLA datasets (observation.image / action). Our own
+    # UR5e conversion writes the MODEL-side names directly - `image`, `state`,
+    # `actions` - because data-collection/to_lerobot.py was written against
+    # forcevla_policy.py's expected keys, so it needs an identity mapping instead.
+    # Overriding it here beats rewriting a converted dataset's columns and video
+    # directory names.
+    repack_map: Mapping[str, str] | None = None
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -439,6 +447,7 @@ class LeRobotForcevlaDataConfig(DataConfigFactory):
         repack_transform = _transforms.Group(
             inputs=[
                 _transforms.RepackTransform(
+                    dict(self.repack_map) if self.repack_map is not None else
                     {
                         "image": "observation.image",
                         "wrist_image": "observation.wrist_image",
@@ -609,6 +618,8 @@ def _forcevla_lora_config(
     batch_size: int = 4,
     assets_dir: str | None = None,
     holdout_episodes: Mapping[str, Sequence[int]] | None = None,
+    repack_map: Mapping[str, str] | None = None,
+    action_sequence_keys: Sequence[str] = ("action",),
 ) -> TrainConfig:
     return TrainConfig(
         name=name,
@@ -618,6 +629,8 @@ def _forcevla_lora_config(
             assets=AssetsConfig(assets_dir=assets_dir, asset_id=asset_id),
             base_config=DataConfig(prompt_from_task=True),
             holdout_episodes=holdout_episodes,
+            repack_map=repack_map,
+            action_sequence_keys=action_sequence_keys,
         ),
         weight_loader=weight_loaders.Pi0GuidanceWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=num_train_steps,
@@ -885,6 +898,70 @@ _CONFIGS = [
     _forcevla_lora_config(
         name="forcevla_lora_insert_usb",
         repo_id="flexiv_insert_USB_inputForce",
+        num_train_steps=10_000,
+    ),
+    #
+    # OURS: the UR5e RAM-insertion datasets collected on this rig
+    # (data-collection/README.md). Three configs so the value of the second
+    # night's data is measurable rather than assumed: session 1 alone, session 2
+    # alone, and both together.
+    #
+    # Every TENTH episode is held out of training in all three, by the same rule,
+    # so the offline action error is computed on data no run ever trained on and
+    # the three numbers are comparable. Episodes alternate place/retrieve, so a
+    # stride of ten takes both kinds.
+    _forcevla_lora_config(
+        name="forcevla_ram_s1",
+        repack_map={"image": "image", "wrist_image": "wrist_image",
+                    "state": "state", "actions": "actions", "prompt": "prompt"},
+        action_sequence_keys=("actions",),
+        repo_id="ur5e_insert_ram",
+        num_train_steps=10_000,
+    ),
+    _forcevla_lora_config(
+        name="forcevla_ram_s2",
+        repack_map={"image": "image", "wrist_image": "wrist_image",
+                    "state": "state", "actions": "actions", "prompt": "prompt"},
+        action_sequence_keys=("actions",),
+        repo_id="ur5e_ram_multi",
+        num_train_steps=10_000,
+    ),
+    # Insert + retrieve + SEAT, once the seating demos are collected. One policy,
+    # three instructions; the prompt selects the phase at inference, so nothing
+    # has to stitch two models together.
+    # THE BASELINE: every episode collected on this rig, all three task phases.
+    # Session 3's last two chunks are excluded by simply not being in this list -
+    # they are `ur5e_ram03_eval`, and no run trains on them.
+    _forcevla_lora_config(
+        name="forcevla_ram_baseline",
+        repack_map={"image": "image", "wrist_image": "wrist_image",
+                    "state": "state", "actions": "actions", "prompt": "prompt"},
+        action_sequence_keys=("actions",),
+        repo_id=["ur5e_insert_ram", "ur5e_ram_multi",
+                 "ur5e_ram03_a", "ur5e_ram03_b", "ur5e_ram03_c", "ur5e_ram03_d",
+                 "ur5e_ram_seat"],
+        asset_id="ur5e_ram_baseline",
+        num_train_steps=20_000,
+    ),
+    _forcevla_lora_config(
+        name="forcevla_ram_full",
+        repack_map={"image": "image", "wrist_image": "wrist_image",
+                    "state": "state", "actions": "actions", "prompt": "prompt"},
+        action_sequence_keys=("actions",),
+        repo_id=["ur5e_insert_ram", "ur5e_ram_multi", "ur5e_ram_seat"],
+        asset_id="ur5e_ram_full",
+        num_train_steps=15_000,
+    ),
+    _forcevla_lora_config(
+        name="forcevla_ram_all",
+        repack_map={"image": "image", "wrist_image": "wrist_image",
+                    "state": "state", "actions": "actions", "prompt": "prompt"},
+        action_sequence_keys=("actions",),
+        repo_id=["ur5e_insert_ram", "ur5e_ram_multi"],
+        # A multi-dataset config must name its own asset_id: norm stats are
+        # computed over the UNION, and reusing either dataset's id would load
+        # statistics for half the data.
+        asset_id="ur5e_ram_all",
         num_train_steps=10_000,
     ),
     _forcevla_lora_config(

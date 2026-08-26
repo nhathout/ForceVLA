@@ -76,6 +76,16 @@ class Pi0_GuidanceConfig(_model.BaseModelConfig):
     action_horizon: int = 50
     max_token_len: int = 48
 
+    # FVLMoE capacity. Defaults reproduce the published ForceVLA exactly, so every
+    # existing config and checkpoint is unaffected; a modification study overrides
+    # them from the training config rather than by forking this file. Routing top-k
+    # selects how many experts process each token and does NOT change any parameter
+    # shape (the expert stack is the same either way), so a top-1 and a top-2 run are
+    # weight-compatible and differ in exactly one scalar -- which is what makes the
+    # A/B attributable. See docs/forcevla_modifications.md (M1).
+    moe_num_experts: int = 4
+    moe_top_k: int = 1
+
     @property
     @override
     def model_type(self) -> _model.ModelType:
@@ -182,8 +192,8 @@ class Pi0_Guidance(_model.BaseModel):
         self.limoe = nnx_bridge.ToNNX(
             _limoe.LIMoEBlock(
                 mlp_dim=paligemma_config.width,
-                num_experts=4,
-                num_top_k=1,
+                num_experts=config.moe_num_experts,
+                num_top_k=config.moe_top_k,
                 num_heads=paligemma_config.num_heads,
                 out_dim=action_expert_config.width,
             )

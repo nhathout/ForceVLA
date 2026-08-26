@@ -620,10 +620,21 @@ def _forcevla_lora_config(
     holdout_episodes: Mapping[str, Sequence[int]] | None = None,
     repack_map: Mapping[str, str] | None = None,
     action_sequence_keys: Sequence[str] = ("action",),
+    moe_top_k: int = 1,
+    moe_num_experts: int = 4,
 ) -> TrainConfig:
+    # The freeze filter must be built from the SAME model config as the model itself:
+    # it is derived from the parameter tree, so constructing it separately with
+    # different arguments is a silent way to freeze the wrong things.
+    model_cfg = pi0_force.Pi0_GuidanceConfig(
+        paligemma_variant="gemma_2b_lora",
+        action_expert_variant="gemma_300m_lora",
+        moe_top_k=moe_top_k,
+        moe_num_experts=moe_num_experts,
+    )
     return TrainConfig(
         name=name,
-        model=pi0_force.Pi0_GuidanceConfig(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
+        model=model_cfg,
         data=LeRobotForcevlaDataConfig(
             repo_id=repo_id,
             assets=AssetsConfig(assets_dir=assets_dir, asset_id=asset_id),
@@ -634,9 +645,7 @@ def _forcevla_lora_config(
         ),
         weight_loader=weight_loaders.Pi0GuidanceWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=num_train_steps,
-        freeze_filter=pi0_force.Pi0_GuidanceConfig(
-            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
-        ).get_freeze_filter(),
+        freeze_filter=model_cfg.get_freeze_filter(),
         ema_decay=None,
         batch_size=batch_size,
     )
@@ -942,6 +951,34 @@ _CONFIGS = [
                  "ur5e_ram_seat"],
         asset_id="ur5e_ram_baseline",
         num_train_steps=20_000,
+    ),
+    # --- M1: top-1 -> top-2 FVLMoE routing -------------------------------------
+    # Byte-identical to forcevla_ram_baseline above EXCEPT moe_top_k, and it reuses
+    # that config's asset_id so both models share one norm_stats.json. Both of those
+    # matter: sharing the normalisation removes the confound that makes the three
+    # existing models' training losses incomparable, so THIS pair can be compared on
+    # loss as well as on held-out error. Same repo_ids, same 20,000 steps, same batch
+    # size, same seed -> the only free variable is how many experts see each token.
+    # Motivation and the falsifiable hypothesis: docs/forcevla_modifications.md (M1).
+    _forcevla_lora_config(
+        name="forcevla_ram_top2",
+        repack_map={"image": "image", "wrist_image": "wrist_image",
+                    "state": "state", "actions": "actions", "prompt": "prompt"},
+        action_sequence_keys=("actions",),
+        repo_id=["ur5e_insert_ram", "ur5e_ram_multi",
+                 "ur5e_ram03_a", "ur5e_ram03_b", "ur5e_ram03_c", "ur5e_ram03_d",
+                 "ur5e_ram_seat"],
+        asset_id="ur5e_ram_baseline",
+        # Point at the BASELINE's asset dir so the identical norm stats are reused
+        # rather than recomputed. Two reasons, both load-bearing: it saves the ~2 h
+        # statistics pass over 574k frames, and - more importantly - it guarantees
+        # both models normalise with the exact same numbers, so their training losses
+        # are on one scale and directly comparable. Recomputing would give
+        # near-identical but not bitwise-equal stats and reintroduce the very
+        # confound that makes the first three models' losses incomparable.
+        assets_dir="./assets/forcevla_ram_baseline",
+        num_train_steps=20_000,
+        moe_top_k=2,
     ),
     _forcevla_lora_config(
         name="forcevla_ram_full",

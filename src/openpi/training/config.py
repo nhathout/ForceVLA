@@ -622,6 +622,7 @@ def _forcevla_lora_config(
     action_sequence_keys: Sequence[str] = ("action",),
     moe_top_k: int = 1,
     moe_num_experts: int = 4,
+    keep_period: int = 5000,
 ) -> TrainConfig:
     # The freeze filter must be built from the SAME model config as the model itself:
     # it is derived from the parameter tree, so constructing it separately with
@@ -648,6 +649,7 @@ def _forcevla_lora_config(
         freeze_filter=model_cfg.get_freeze_filter(),
         ema_decay=None,
         batch_size=batch_size,
+        keep_period=keep_period,
     )
 
 
@@ -952,7 +954,44 @@ _CONFIGS = [
         asset_id="ur5e_ram_baseline",
         num_train_steps=20_000,
     ),
-    # --- M1: top-1 -> top-2 FVLMoE routing -------------------------------------
+    # --- M1: THE CONVERGENCE RUN -----------------------------------------------
+    # Byte-identical to forcevla_ram_baseline except num_train_steps and how many
+    # checkpoints are kept. It reuses the baseline's asset_id AND assets_dir, so
+    # both models normalise with the exact same numbers and their losses sit on
+    # one scale - the same discipline that makes the top-1/top-2 A/B valid.
+    #
+    # WHY. 20,000 steps at batch 4 is 80,000 samples against a 534,429-frame
+    # training union: 15.0 % of ONE epoch. Held-out error 4.52 mm and the
+    # train-fit control 4.55 mm - no generalisation gap, so the model is
+    # training-budget limited rather than capacity limited, and nothing subtle
+    # has had the chance to be learned yet. That is the standing explanation for
+    # the flat force ablation.
+    #
+    # It now has a second, independent line of evidence. Measured 2026-09-08 on
+    # the real arm: the policy commands steps 2.35x the demonstrated median
+    # (4.69 mm vs 2.00 mm per 10 Hz frame) and NEVER stops, where the
+    # demonstrations are stationary 23.5 % of frames and dash to 29.5 mm/frame.
+    # A tight unimodal output against a strongly bimodal target is a model
+    # regressing to the conditional mean - exactly what an under-trained policy
+    # does. See docs/speed_slider_hazard.md 5.
+    #
+    # 300,000 steps is 15 epochs and about 50 h at the measured 3 h 22 m per
+    # 20,000 steps. keep_period 25,000 keeps 12 checkpoints at ~9.5 GB each
+    # (~114 GB) instead of 60 (~570 GB) on a disk with 937 GB free.
+    _forcevla_lora_config(
+        name="forcevla_ram_converge",
+        repack_map={"image": "image", "wrist_image": "wrist_image",
+                    "state": "state", "actions": "actions", "prompt": "prompt"},
+        action_sequence_keys=("actions",),
+        repo_id=["ur5e_insert_ram", "ur5e_ram_multi",
+                 "ur5e_ram03_a", "ur5e_ram03_b", "ur5e_ram03_c", "ur5e_ram03_d",
+                 "ur5e_ram_seat"],
+        asset_id="ur5e_ram_baseline",
+        assets_dir="./assets/forcevla_ram_baseline",
+        num_train_steps=300_000,
+        keep_period=25_000,
+    ),
+    # --- M1b: top-1 -> top-2 FVLMoE routing ------------------------------------
     # Byte-identical to forcevla_ram_baseline above EXCEPT moe_top_k, and it reuses
     # that config's asset_id so both models share one norm_stats.json. Both of those
     # matter: sharing the normalisation removes the confound that makes the three

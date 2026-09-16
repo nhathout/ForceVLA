@@ -991,6 +991,44 @@ _CONFIGS = [
         num_train_steps=300_000,
         keep_period=25_000,
     ),
+    # --- R1: THE FIRST RUN ON REPAIRED DATA ------------------------------------
+    # Same seven datasets, same everything, but pointed at the `_v2` re-conversions
+    # (docs/reconversion_result.md). Every run above this line trained on data in
+    # which ~11 % of frames described orientations the tool never held
+    # (docs/THE_ROOT_CAUSE.md), so none of them is a measurement of this
+    # architecture on this task - they are measurements of the defect.
+    #
+    # WHY A NEW asset_id, AND WHY THAT BREAKS COMPARABILITY.
+    # The repair changes state[3:6] and actions[3:6] on 13.6 % of frames, so the
+    # normalisation statistics over the rotation channel change. Reusing
+    # `ur5e_ram_baseline`'s assets would normalise repaired data with defective
+    # statistics - the exact class of silent error this project just spent three
+    # weeks on. So: a fresh asset_id, fresh norm stats, and the losses here do NOT
+    # sit on the same scale as the runs above. Do not plot them together.
+    #
+    # WHY 120,000 STEPS WITH keep_period 10,000, AND NOT A SHORT RUN FIRST.
+    # One run answers three questions because the intermediate checkpoints are
+    # kept:
+    #   step  20,000 - the SAME budget as forcevla_ram_baseline, so repaired vs
+    #                  defective data is a controlled comparison at equal cost
+    #   step 100,000 - where the convergence run located the held-out optimum
+    #                  (docs/convergence_finding.md). That was found on DEFECTIVE
+    #                  data, so it is a prior, not a guarantee
+    #   step 120,000 - past it, which is what shows whether the optimum moved
+    # At the measured 0.61 s/step that is ~20 h. A separate short run would cost
+    # 3.4 h extra and tell us nothing the step-20,000 checkpoint does not.
+    _forcevla_lora_config(
+        name="forcevla_ram_v2",
+        repack_map={"image": "image", "wrist_image": "wrist_image",
+                    "state": "state", "actions": "actions", "prompt": "prompt"},
+        action_sequence_keys=("actions",),
+        repo_id=["ur5e_insert_ram_v2", "ur5e_ram_multi_v2",
+                 "ur5e_ram03_a_v2", "ur5e_ram03_b_v2", "ur5e_ram03_c_v2",
+                 "ur5e_ram03_d_v2", "ur5e_ram_seat_v2"],
+        asset_id="ur5e_ram_v2",
+        num_train_steps=120_000,
+        keep_period=10_000,
+    ),
     # --- M1b: top-1 -> top-2 FVLMoE routing ------------------------------------
     # Byte-identical to forcevla_ram_baseline above EXCEPT moe_top_k, and it reuses
     # that config's asset_id so both models share one norm_stats.json. Both of those

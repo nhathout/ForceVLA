@@ -86,6 +86,17 @@ class Pi0_GuidanceConfig(_model.BaseModelConfig):
     moe_num_experts: int = 4
     moe_top_k: int = 1
 
+    # M7. How many leading dims of `state` reach the ACTION EXPERT's state token.
+    # `state` is [32]: [0:7] pose+gripper, [7:13] wrench, [13:32] padding. The
+    # released ForceVLA passes 7, so the action expert -- the part that actually
+    # emits the chunk -- never sees force; force reaches the model only through
+    # FVLMoE on the encoder side. 13 additionally admits the six wrench channels.
+    # This adds NO parameters: state_proj is Linear(32 -> width) either way and
+    # the columns for dims 7:13 already exist, currently multiplied by zero. The
+    # default of 7 keeps every existing config and checkpoint bit-identical.
+    # docs/architecture_options.md item 1.
+    state_expert_dims: int = 7
+
     @property
     @override
     def model_type(self) -> _model.ModelType:
@@ -177,6 +188,7 @@ class Pi0_Guidance(_model.BaseModel):
         img.lazy_init(next(iter(config.fake_obs().images.values())), train=False, rngs=rngs)
         self.PaliGemma = nnx.Dict(llm=llm, img=img)
         self.state_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
+        self.state_expert_dims = config.state_expert_dims  # M7, see Pi0_GuidanceConfig
         # self.guidance_proj = nnx.Linear(config.action_dim, 3 * paligemma_config.width, rngs=rngs) ###
         self.action_in_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
         self.action_time_mlp_in = nnx.Linear(2 * action_expert_config.width, action_expert_config.width, rngs=rngs)
@@ -243,7 +255,8 @@ class Pi0_Guidance(_model.BaseModel):
         tokens = []
         # obs.state is shape [b, 13] (13 = 7 prio + 6 force, ee pose: xyz+rpy, gripper)
         observations = jnp.zeros_like(obs.state)
-        observations = observations.at[:, :7].set(obs.state[:, :7]) ## robot state, xyz + rpy + gripper
+        d = self.state_expert_dims  # M7: 7 = pose+gripper only (released ForceVLA); 13 = + wrench
+        observations = observations.at[:, :d].set(obs.state[:, :d]) ## robot state, xyz + rpy + gripper [+ wrench]
         state_token = self.state_proj(observations)[:, None, :] # [b, 1, d]
         # state_token = self.state_proj(obs.state)[:, None, :] # [b, 1, d]
         tokens.append(state_token)

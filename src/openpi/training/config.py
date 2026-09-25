@@ -622,6 +622,7 @@ def _forcevla_lora_config(
     action_sequence_keys: Sequence[str] = ("action",),
     moe_top_k: int = 1,
     moe_num_experts: int = 4,
+    state_expert_dims: int = 7,
     keep_period: int = 5000,
 ) -> TrainConfig:
     # The freeze filter must be built from the SAME model config as the model itself:
@@ -632,6 +633,7 @@ def _forcevla_lora_config(
         action_expert_variant="gemma_300m_lora",
         moe_top_k=moe_top_k,
         moe_num_experts=moe_num_experts,
+        state_expert_dims=state_expert_dims,
     )
     return TrainConfig(
         name=name,
@@ -1026,6 +1028,42 @@ _CONFIGS = [
                  "ur5e_ram03_a_v2", "ur5e_ram03_b_v2", "ur5e_ram03_c_v2",
                  "ur5e_ram03_d_v2", "ur5e_ram_seat_v2"],
         asset_id="ur5e_ram_v2",
+        num_train_steps=120_000,
+        keep_period=10_000,
+    ),
+    # --- M7: let the ACTION EXPERT see the wrench ------------------------------
+    # Byte-identical to forcevla_ram_v2 EXCEPT state_expert_dims, and it REUSES
+    # that config's asset_id so both models share one norm_stats.json. Both of
+    # those matter: sharing the normalisation removes the confound that would
+    # otherwise make the pair uncomparable, and a single differing scalar is what
+    # makes the A/B attributable to the change rather than to the run.
+    #
+    # WHAT IT TESTS. In the released ForceVLA the action expert's state token is
+    # built from state[0:7] only, so the six wrench channels are zeroed before the
+    # part of the network that emits the action chunk (pi0_force.py, embed_suffix).
+    # Force's only route in is the FVLMoE token on the encoder side. Measured on
+    # forcevla_ram_v2 step 119,999, zeroing the wrench at inference moves predicted
+    # translation by ~0.1-0.3 %, which is what that architecture predicts.
+    #
+    # HYPOTHESIS (falsifiable): the force ablation is near-flat because the action
+    # expert has no force input to lose. Give it one and the ablation moves. A null
+    # result here is still a much stronger null than the current one.
+    #
+    # No new parameters: state_proj is Linear(32 -> width) in both arms; the weight
+    # columns for dims 7:13 exist already and are currently multiplied by zero.
+    # External evidence: TA-VLA (arXiv 2509.07962) found decoder-side injection
+    # beats encoder-side. docs/architecture_options.md item 1.
+    _forcevla_lora_config(
+        name="forcevla_ram_m7",
+        repack_map={"image": "image", "wrist_image": "wrist_image",
+                    "state": "state", "actions": "actions", "prompt": "prompt"},
+        action_sequence_keys=("actions",),
+        repo_id=["ur5e_insert_ram_v2", "ur5e_ram_multi_v2",
+                 "ur5e_ram03_a_v2", "ur5e_ram03_b_v2", "ur5e_ram03_c_v2",
+                 "ur5e_ram03_d_v2", "ur5e_ram_seat_v2"],
+        asset_id="ur5e_ram_v2",
+        assets_dir="./assets/forcevla_ram_v2",
+        state_expert_dims=13,
         num_train_steps=120_000,
         keep_period=10_000,
     ),

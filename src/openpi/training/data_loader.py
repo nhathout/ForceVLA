@@ -140,6 +140,20 @@ def _train_episodes(repo_id: str, total_episodes: int, holdout: typing.Mapping[s
     return kept
 
 
+def _delta_timestamps(data_config: _config.DataConfig, action_horizon: int, fps: float) -> dict[str, list[float]]:
+    """LeRobot delta_timestamps: the action chunk for every action key and (M4/M8) the state window.
+
+    Without `state_delta_indices` this is exactly the released dict (every existing config).
+    The window is on the dataset's own 10 Hz grid, so no re-conversion is needed.
+    """
+    dt = {key: [t / fps for t in range(action_horizon)] for key in data_config.action_sequence_keys}
+    if data_config.state_delta_indices:
+        if data_config.state_key in dt:
+            raise ValueError(f"state_key {data_config.state_key!r} is also an action sequence key")
+        dt[data_config.state_key] = [i / fps for i in data_config.state_delta_indices]
+    return dt
+
+
 def create_torch_dataset(
     data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
 ) -> Dataset:
@@ -160,9 +174,7 @@ def create_torch_dataset(
         dataset = lerobot_dataset.LeRobotDataset(
             repo_id,
             episodes=episodes,
-            delta_timestamps={
-                key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
-            },
+            delta_timestamps=_delta_timestamps(data_config, action_horizon, dataset_meta.fps),
         )
 
         if data_config.prompt_from_task:
@@ -190,7 +202,7 @@ def create_torch_dataset(
     dataset = lerobot_dataset.MultiLeRobotDataset(
         repo_ids,
         episodes=episodes,
-        delta_timestamps={key: [t / fps for t in range(action_horizon)] for key in data_config.action_sequence_keys},
+        delta_timestamps=_delta_timestamps(data_config, action_horizon, fps),
     )
 
     if data_config.prompt_from_task:

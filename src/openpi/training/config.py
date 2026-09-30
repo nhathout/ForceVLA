@@ -96,6 +96,13 @@ class DataConfig:
     # exclusion. Norm stats are unaffected unless compute_norm_stats is run with this same config.
     holdout_episodes: Mapping[str, Sequence[int]] | None = None
 
+    # M4/M8 (docs/plan_architecture_experiments.md sec 4.4): extra per-sample frame offsets
+    # fetched for the dataset key `state_key`, e.g. (-4,-2,-1,0) for a history or (0,1,...,H)
+    # for a future-wrench target. None = one state per sample (every existing config,
+    # bit-identical). forcevla_policy.ForceWindow turns the window back into one state.
+    state_delta_indices: Sequence[int] | None = None
+    state_key: str = "state"
+
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
     # Action space for DROID dataset.
@@ -430,6 +437,12 @@ class LeRobotForcevlaDataConfig(DataConfigFactory):
     # Overriding it here beats rewriting a converted dataset's columns and video
     # directory names.
     repack_map: Mapping[str, str] | None = None
+    # M4: lags k (frames at 10 Hz) of the wrench-difference history w(t) - w(t-k), written
+    # into state[13:13+6*len]. () = no history (every existing config).
+    history_lags: Sequence[int] = ()
+    # M8: replace action dims 7:13 (zero padding) with the wrench at t+1..t+H, so the
+    # action expert co-generates it. False = every existing config.
+    future_wrench: bool = False
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -444,18 +457,19 @@ class LeRobotForcevlaDataConfig(DataConfigFactory):
         print("-"*100)
         print("ForceVla data is loading..")
         print("-"*100)
+        repack_dict = (
+            dict(self.repack_map) if self.repack_map is not None else
+            {
+                "image": "observation.image",
+                "wrist_image": "observation.wrist_image",
+                "state": "observation.state",
+                "actions": "action",
+                "prompt": "prompt",
+            }
+        )
         repack_transform = _transforms.Group(
             inputs=[
-                _transforms.RepackTransform(
-                    dict(self.repack_map) if self.repack_map is not None else
-                    {
-                        "image": "observation.image",
-                        "wrist_image": "observation.wrist_image",
-                        "state": "observation.state",
-                        "actions": "action",
-                        "prompt": "prompt",
-                    }
-                )
+                _transforms.RepackTransform(repack_dict)
             ]
         )
         # The data transforms are applied to the data coming from the dataset *and* during inference.
@@ -464,9 +478,34 @@ class LeRobotForcevlaDataConfig(DataConfigFactory):
         # We defined these transforms in `libero_policy.py`. You can check the detailed comments there for
         # how to modify the transforms to match your dataset. Once you created your own transforms, you can
         # replace the transforms below with your own.
+        # M4/M8: fetch a window of states and let ForceWindow (first, before the padding in
+        # Forcevla_inputs) turn it into the model's state / the future-wrench target. With
+        # neither knob set, `idx` stays None and the transforms are the released ones.
+        idx = None
+        inputs = [forcevla_policy.Forcevla_inputs(action_dim=model_config.action_dim, model_type=model_config.model_type)]
+        if self.history_lags or self.future_wrench:
+            lags = tuple(int(k) for k in self.history_lags)
+            if any(k < 1 for k in lags) or len(set(lags)) != len(lags):
+                raise ValueError(f"history_lags must be distinct positive frame counts, got {lags}")
+            need = 13 + 6 * len(lags)
+            if need > model_config.action_dim:
+                raise ValueError(f"13 + 6*{len(lags)} history dims = {need} > action_dim {model_config.action_dim}")
+            sed = getattr(model_config, "state_expert_dims", None)
+            if lags and sed is not None and sed != need:
+                # Without this the history would be built, normalised and then never reach
+                # the action expert (or it would read zero padding) - silently.
+                raise ValueError(f"history_lags={lags} needs state_expert_dims={need}, got {sed}")
+            H = model_config.action_horizon
+            idx = tuple(sorted({0, *(-k for k in lags), *(range(1, H + 1) if self.future_wrench else ())}))
+            inputs.insert(0, forcevla_policy.ForceWindow(
+                delta_indices=idx, history_lags=lags, future_wrench=self.future_wrench, action_horizon=H))
+        elif getattr(model_config, "state_expert_dims", 0) > 13:
+            raise ValueError(
+                f"state_expert_dims={model_config.state_expert_dims} > 13 reads state[13:] - zero "
+                "padding unless history_lags builds a history there")
         data_transforms = _transforms.Group(
-            inputs=[forcevla_policy.Forcevla_inputs(action_dim=model_config.action_dim, model_type=model_config.model_type)],
-            outputs=[forcevla_policy.Forcevla_outputs()],
+            inputs=inputs,
+            outputs=[forcevla_policy.Forcevla_outputs(emit_wrench=self.future_wrench)],
         )
         # One additional data transform: pi0 models are trained on delta actions (relative to the first
         # state in each action chunk). IF your data has ``absolute`` actions (e.g. target joint angles)
@@ -498,6 +537,7 @@ class LeRobotForcevlaDataConfig(DataConfigFactory):
             model_transforms=model_transforms,
             action_sequence_keys=self.action_sequence_keys,
             holdout_episodes=self.holdout_episodes,
+            **({} if idx is None else {"state_delta_indices": idx, "state_key": repack_dict["state"]}),
         )
 
 @dataclasses.dataclass(frozen=True)
@@ -624,7 +664,14 @@ def _forcevla_lora_config(
     moe_num_experts: int = 4,
     state_expert_dims: int = 7,
     keep_period: int = 5000,
+    history_lags: Sequence[int] = (),
+    future_wrench: bool = False,
+    wrench_loss_weight: float = 1.0,
+    moe_readout: str = "tail",
 ) -> TrainConfig:
+    # M8's loss weight only means something when dims 7:13 hold the future wrench.
+    if wrench_loss_weight != 1.0 and not future_wrench:
+        raise ValueError(f"{name}: wrench_loss_weight={wrench_loss_weight} without future_wrench=True")
     # The freeze filter must be built from the SAME model config as the model itself:
     # it is derived from the parameter tree, so constructing it separately with
     # different arguments is a silent way to freeze the wrong things.
@@ -634,6 +681,8 @@ def _forcevla_lora_config(
         moe_top_k=moe_top_k,
         moe_num_experts=moe_num_experts,
         state_expert_dims=state_expert_dims,
+        wrench_loss_weight=wrench_loss_weight,
+        moe_readout=moe_readout,
     )
     return TrainConfig(
         name=name,
@@ -645,6 +694,8 @@ def _forcevla_lora_config(
             holdout_episodes=holdout_episodes,
             repack_map=repack_map,
             action_sequence_keys=action_sequence_keys,
+            history_lags=tuple(history_lags),
+            future_wrench=future_wrench,
         ),
         weight_loader=weight_loaders.Pi0GuidanceWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=num_train_steps,
@@ -653,6 +704,48 @@ def _forcevla_lora_config(
         batch_size=batch_size,
         keep_period=keep_period,
     )
+
+
+# --- The seven repaired RAM training repos: the forcevla_ram_v2 / forcevla_ram_m7 union ---
+_RAM_V2_REPOS = ["ur5e_insert_ram_v2", "ur5e_ram_multi_v2",
+                 "ur5e_ram03_a_v2", "ur5e_ram03_b_v2", "ur5e_ram03_c_v2",
+                 "ur5e_ram03_d_v2", "ur5e_ram_seat_v2"]
+
+# --- SEAT2 fine-tunes: docs/plan_seating_data.md sec 5 --------------------------------
+# Continued training of forcevla_ram_v2 / forcevla_ram_m7 step 119,999 (params + AdamW
+# state + schedule position, RESUMED from a COPY of the parent checkpoint) for 15,000
+# more steps at the schedule's floor LR 2.5e-6. Data = the parents' seven repos + the
+# NEW seating TRAIN repo repeated _SEAT2_K_FT times (~25 % of samples). Norm stats are
+# the parents' (asset_id ur5e_ram_v2) byte for byte, so parents and children share one
+# normalisation. ur5e_ram_seat2_eval_v2 (held out) and ur5e_ram_seat2_pilot_v2 must
+# NEVER be listed. Demo/robot models: not arms of the architecture study.
+_SEAT2_K_FT = 26   # = round(178_143 / total_frames(ur5e_ram_seat2_v2)); SET AFTER CONVERSION
+
+# --- The architecture arms: docs/plan_architecture_experiments.md sec 2 ------------------
+# ONE training union for all five from-scratch runs (R0a, R0b, A1, A2, A3): the seven repos
+# above plus the NEW seating TRAIN repo repeated _SEAT2_K_ARM times (~10 % of samples,
+# docs/plan_seating_data.md sec 5.2). Held out, never listed here and never in norm stats:
+# ur5e_ram03_eval_v2, ur5e_ram_seat2_eval_v2 and ur5e_ram_seat2_pilot_v2. The seating repo
+# names are PROVISIONAL (plan sec 2.1 lists every place they appear). Freeze this tuple, K
+# included, before R0a's norm stats are computed: every arm's normalisation derives from it.
+_SEAT2_K_ARM = 9  # = round(59_381 / total_frames(ur5e_ram_seat2_v2)); SET AFTER CONVERSION
+RAM_RS_REPOS = (*_RAM_V2_REPOS, *(("ur5e_ram_seat2_v2",) * _SEAT2_K_ARM))
+
+
+def _ram_rs(name: str, **kw) -> TrainConfig:
+    """One helper for the five arm configs, so nothing but the named knob can differ.
+
+    Same data, schedule, batch, seed and init for every arm; asset_id ur5e_ram_rs. R0a
+    (forcevla_ram_rs_v2) owns the norm stats; R0b and A3 point assets_dir at them; A1/A2
+    get a patched copy (scripts/data/make_arm_norm_stats.py, plan sec 2.2).
+    """
+    return _forcevla_lora_config(
+        name=name,
+        repack_map={"image": "image", "wrist_image": "wrist_image",
+                    "state": "state", "actions": "actions", "prompt": "prompt"},
+        action_sequence_keys=("actions",),
+        repo_id=list(RAM_RS_REPOS), asset_id="ur5e_ram_rs",
+        num_train_steps=120_000, keep_period=20_000, **kw)
 
 
 # Use `get_config` if you need to get a config by name in your code.
@@ -1067,6 +1160,55 @@ _CONFIGS = [
         num_train_steps=120_000,
         keep_period=10_000,
     ),
+    # --- SEAT2 fine-tunes (see _SEAT2_K_FT above; docs/plan_seating_data.md sec 5) ---
+    # Resume from a COPY of the parent's 119999 (plan sec 5.3): never in the parent's own
+    # directory, whose headline checkpoint the first new save would delete.
+    _forcevla_lora_config(
+        name="forcevla_ram_v2_seat2ft",
+        repack_map={"image": "image", "wrist_image": "wrist_image",
+                    "state": "state", "actions": "actions", "prompt": "prompt"},
+        action_sequence_keys=("actions",),
+        repo_id=_RAM_V2_REPOS + ["ur5e_ram_seat2_v2"] * _SEAT2_K_FT,
+        asset_id="ur5e_ram_v2",
+        assets_dir="./assets/forcevla_ram_v2",
+        num_train_steps=135_000,
+        keep_period=10_000,   # dead: train_ram_v2.sh's CLI --keep_period 10000 overrides it
+    ),
+    _forcevla_lora_config(
+        name="forcevla_ram_m7_seat2ft",
+        repack_map={"image": "image", "wrist_image": "wrist_image",
+                    "state": "state", "actions": "actions", "prompt": "prompt"},
+        action_sequence_keys=("actions",),
+        repo_id=_RAM_V2_REPOS + ["ur5e_ram_seat2_v2"] * _SEAT2_K_FT,
+        asset_id="ur5e_ram_v2",
+        assets_dir="./assets/forcevla_ram_v2",
+        state_expert_dims=13,
+        num_train_steps=135_000,
+        keep_period=10_000,   # dead: train_ram_v2.sh's CLI --keep_period 10000 overrides it
+    ),
+    # --- THE ARCHITECTURE ARMS: docs/plan_architecture_experiments.md ---------------------
+    # Five from-scratch 120k runs on RAM_RS_REPOS, each ONE knob away from its parent (plan
+    # sec 2.3; scripts/eval/test_arm_pipeline.py V1 prints the diffs). Every arm adds ZERO
+    # parameters, so all five share one parameter tree. Decisions at the 80k checkpoint.
+    # R0a: the published ForceVLA on the new union. Owns ./assets/forcevla_ram_rs_v2/ur5e_ram_rs.
+    _ram_rs("forcevla_ram_rs_v2"),
+    # R0b: M7 (the action expert also sees state[7:13]). Shares R0a's norm stats.
+    _ram_rs("forcevla_ram_rs_m7", assets_dir="./assets/forcevla_ram_rs_v2", state_expert_dims=13),
+    # A1 = M8 (parent R0b): co-generate the wrench at t+1..t+50 in action dims 7:13, loss
+    # weight beta = 0.1 on them (plan sec 3.5, pre-registered). Norm stats: R0a's, with
+    # actions[7:13] := state[7:13] (make_arm_norm_stats.py --arm m8).
+    _ram_rs("forcevla_ram_rs_m8", assets_dir="./assets/forcevla_ram_rs_m8", state_expert_dims=13,
+            future_wrench=True, wrench_loss_weight=0.1),
+    # A2 = M4 (parent R0b): 3-lag wrench-difference history in state[13:31]. The lags are
+    # PRE-REGISTERED on Mon 28 from the pilot data (plan sec 4.2: (1, 3, 6) if the median
+    # onset->release is >= 6 frames); change them here AND in make_arm_norm_stats.py's
+    # --history-lags before the norm-stat patch. Norm stats: R0a's + state[13:31] computed.
+    _ram_rs("forcevla_ram_rs_m4", assets_dir="./assets/forcevla_ram_rs_m4", state_expert_dims=31,
+            history_lags=(1, 3, 6)),
+    # A3 = M2a (parent R0a): the FVLMoE force-token output broadcast to all 50 action steps.
+    # A mechanism test (readout bottleneck: yes / no), never a "winner" (plan sec 2.6, 5.1).
+    _ram_rs("forcevla_ram_rs_m2a", assets_dir="./assets/forcevla_ram_rs_v2",
+            moe_readout="tail_force_broadcast"),
     # --- M1b: top-1 -> top-2 FVLMoE routing ------------------------------------
     # Byte-identical to forcevla_ram_baseline above EXCEPT moe_top_k, and it reuses
     # that config's asset_id so both models share one norm_stats.json. Both of those

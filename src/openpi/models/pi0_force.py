@@ -65,6 +65,23 @@ def posemb_sincos(
     return jnp.concatenate([jnp.sin(sinusoid_input), jnp.cos(sinusoid_input)], axis=-1)
 
 
+# Pi0_GuidanceConfig.moe_readout values (M2a).
+MOE_READOUTS = ("tail", "tail_force_broadcast")
+
+
+def _flow_matching_loss(v_t, u_t, wrench_loss_weight: float = 1.0):
+    """Per-step flow-matching loss [*b, ah]: the mean over action dims of (v_t - u_t)^2.
+
+    M8: dims 7:13 are weighted by `wrench_loss_weight`; the mean still divides by all
+    action_dim dims. 1.0 takes the released code path exactly (bit-identical).
+    """
+    sq = jnp.square(v_t - u_t)
+    if wrench_loss_weight == 1.0:  # unchanged path for every existing config
+        return jnp.mean(sq, axis=-1)
+    w = jnp.ones((sq.shape[-1],), sq.dtype).at[7:13].set(wrench_loss_weight)
+    return jnp.mean(sq * w, axis=-1)
+
+
 @dataclasses.dataclass(frozen=True)
 class Pi0_GuidanceConfig(_model.BaseModelConfig):
     dtype: str = "bfloat16"
@@ -95,7 +112,23 @@ class Pi0_GuidanceConfig(_model.BaseModelConfig):
     # the columns for dims 7:13 already exist, currently multiplied by zero. The
     # default of 7 keeps every existing config and checkpoint bit-identical.
     # docs/architecture_options.md item 1.
+    # 31 (M4, docs/plan_architecture_experiments.md sec 4) additionally admits
+    # state[13:31] = [w(t) - w(t-k) for k in history_lags], the wrench-difference
+    # history that forcevla_policy.ForceWindow writes there. Still no new parameters:
+    # state[13:32] is zero padding whose state_proj columns already exist.
     state_expert_dims: int = 7
+
+    # M8 (plan sec 3). Per-dim weight on action dims 7:13 of the flow-matching loss.
+    # Those dims are zero padding unless the data config sets future_wrench=True, in
+    # which case they hold the wrench at t+1..t+H. 1.0 = the existing unweighted mean,
+    # bit-identical for every existing config.
+    wrench_loss_weight: float = 1.0
+
+    # M2a (plan sec 5). How the FVLMoE output reaches the action tokens. "tail" =
+    # released ForceVLA: the last H positions of [prefix_out, force_token] are added
+    # position-wise, so the force token's output lands on action step H-1 only.
+    # "tail_force_broadcast" additionally adds the force-token output to steps 0..H-2.
+    moe_readout: str = "tail"
 
     @property
     @override
@@ -165,6 +198,8 @@ class Pi0_GuidanceConfig(_model.BaseModelConfig):
 
 class Pi0_Guidance(_model.BaseModel):
     def __init__(self, config: Pi0_GuidanceConfig, rngs: nnx.Rngs):
+        if config.moe_readout not in MOE_READOUTS:  # M2a; fail before building anything
+            raise ValueError(f"moe_readout={config.moe_readout!r}; expected one of {MOE_READOUTS}")
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
@@ -189,6 +224,8 @@ class Pi0_Guidance(_model.BaseModel):
         self.PaliGemma = nnx.Dict(llm=llm, img=img)
         self.state_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
         self.state_expert_dims = config.state_expert_dims  # M7, see Pi0_GuidanceConfig
+        self.wrench_loss_weight = config.wrench_loss_weight  # M8, see Pi0_GuidanceConfig
+        self.moe_readout = config.moe_readout  # M2a, see Pi0_GuidanceConfig
         # self.guidance_proj = nnx.Linear(config.action_dim, 3 * paligemma_config.width, rngs=rngs) ###
         self.action_in_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
         self.action_time_mlp_in = nnx.Linear(2 * action_expert_config.width, action_expert_config.width, rngs=rngs)
@@ -211,6 +248,19 @@ class Pi0_Guidance(_model.BaseModel):
             )
         )
         self.limoe.lazy_init(jnp.zeros((32, 200, paligemma_config.width)), True, rngs=rngs)
+
+    def _moe_readout(self, limoe_seq):
+        """M2a. FVLMoE output [b, P+1, w] -> the [b, H, w] term added to the action tokens.
+
+        "tail" returns the released slice exactly. "tail_force_broadcast" keeps that tail and
+        adds the force token's output (the last position) to steps 0..H-2 as well, so it
+        reaches every step instead of step H-1 only; the tail's other contributions stay.
+        """
+        tail = limoe_seq[:, -self.action_horizon :]
+        if self.moe_readout == "tail":
+            return tail
+        f = limoe_seq[:, -1:, :]  # the force token's FVLMoE output
+        return tail.at[:, :-1].add(jnp.broadcast_to(f, tail[:, :-1].shape))
 
     @at.typecheck
     def embed_prefix(
@@ -307,8 +357,8 @@ class Pi0_Guidance(_model.BaseModel):
         )
         
         limoe_out = self.limoe(jnp.concatenate([prefix_out, force_tokens], axis=1)) ## prefix_out is vlm
-        v_t = self.action_out_proj(limoe_out[0][:, -self.action_horizon :] + suffix_out[:, -self.action_horizon :])
-        return jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        v_t = self.action_out_proj(self._moe_readout(limoe_out[0]) + suffix_out[:, -self.action_horizon :])
+        return _flow_matching_loss(v_t, u_t, self.wrench_loss_weight)
 
     @override
     def sample_actions(
@@ -359,7 +409,7 @@ class Pi0_Guidance(_model.BaseModel):
             assert prefix_out is None
 
             limoe_out = self.limoe(jnp.concatenate([prefix_out_fix, force_tokens], axis=1)) ## prefix_out is vlm
-            v_t = self.action_out_proj(limoe_out[0][:, -self.action_horizon :] + suffix_out[:, -self.action_horizon :])
+            v_t = self.action_out_proj(self._moe_readout(limoe_out[0]) + suffix_out[:, -self.action_horizon :])
             # v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
             return x_t + dt * v_t, time + dt

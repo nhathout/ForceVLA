@@ -66,7 +66,7 @@ def posemb_sincos(
 
 
 # Pi0_GuidanceConfig.moe_readout values (M2a).
-MOE_READOUTS = ("tail", "tail_force_broadcast")
+MOE_READOUTS = ("tail", "tail_force_broadcast", "none")
 
 
 def _flow_matching_loss(v_t, u_t, wrench_loss_weight: float = 1.0):
@@ -128,6 +128,12 @@ class Pi0_GuidanceConfig(_model.BaseModelConfig):
     # released ForceVLA: the last H positions of [prefix_out, force_token] are added
     # position-wise, so the force token's output lands on action step H-1 only.
     # "tail_force_broadcast" additionally adds the force-token output to steps 0..H-2.
+    # "none" (baselines B-pi0 / B-naive, added 2026-10-08) adds NOTHING: the FVLMoE term is
+    # zero, so v_t = action_out_proj(suffix_out[:, -H:]) - the original pi0 readout (the
+    # commented-out line in sample_actions). The force token is consumed ONLY by self.limoe,
+    # whose output reaches the actions ONLY through this readout, so "none" removes the whole
+    # encoder-side force route. The LIMoE block and force_in_proj stay in the parameter tree
+    # (identical init, zero gradient), so every config keeps one parameter tree.
     moe_readout: str = "tail"
 
     @property
@@ -252,13 +258,16 @@ class Pi0_Guidance(_model.BaseModel):
     def _moe_readout(self, limoe_seq):
         """M2a. FVLMoE output [b, P+1, w] -> the [b, H, w] term added to the action tokens.
 
-        "tail" returns the released slice exactly. "tail_force_broadcast" keeps that tail and
+        "tail" returns the released slice exactly; "none" returns zeros (no FVLMoE route).
+        "tail_force_broadcast" keeps that tail and
         adds the force token's output (the last position) to steps 0..H-2 as well, so it
         reaches every step instead of step H-1 only; the tail's other contributions stay.
         """
         tail = limoe_seq[:, -self.action_horizon :]
         if self.moe_readout == "tail":
             return tail
+        if self.moe_readout == "none":  # baselines B-pi0 / B-naive: no FVLMoE contribution
+            return jnp.zeros_like(tail)
         f = limoe_seq[:, -1:, :]  # the force token's FVLMoE output
         return tail.at[:, :-1].add(jnp.broadcast_to(f, tail[:, :-1].shape))
 

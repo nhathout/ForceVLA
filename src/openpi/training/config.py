@@ -1209,6 +1209,15 @@ _CONFIGS = [
     # A mechanism test (readout bottleneck: yes / no), never a "winner" (plan sec 2.6, 5.1).
     _ram_rs("forcevla_ram_rs_m2a", assets_dir="./assets/forcevla_ram_rs_v2",
             moe_readout="tail_force_broadcast"),
+    # --- Added 2026-10-08, AFTER the 80k results: the two lower rungs of the force-route ladder
+    # (docs/plan_architecture_experiments.md "Added 8 Oct 2026"). Reference points for the
+    # closed-loop comparison on seating, not pre-registered decisions. Parent R0a; R0a's norm stats.
+    # B-pi0: no force at all - the FVLMoE readout is off and the action expert sees state[0:7].
+    _ram_rs("forcevla_ram_rs_pi0", assets_dir="./assets/forcevla_ram_rs_v2", moe_readout="none"),
+    # B-naive: the wrench only in the action expert's state token (state[0:13]), no FVLMoE -
+    # the ForceVLA paper's "pi0 w/ F" baseline.
+    _ram_rs("forcevla_ram_rs_naive", assets_dir="./assets/forcevla_ram_rs_v2", state_expert_dims=13,
+            moe_readout="none"),
     # --- M1b: top-1 -> top-2 FVLMoE routing ------------------------------------
     # Byte-identical to forcevla_ram_baseline above EXCEPT moe_top_k, and it reuses
     # that config's asset_id so both models share one norm_stats.json. Both of those

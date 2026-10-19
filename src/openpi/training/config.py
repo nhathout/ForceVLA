@@ -757,7 +757,7 @@ def _ram_rs(name: str, **kw) -> TrainConfig:
 # Nothing else may differ from the parent: scripts/eval/check_tr1ft_configs.py proves it.
 # Held-out repos (ur5e_ram03_eval_v2, the seat2 eval/pilot, every ur5e_ram_gen_ho*) are NEVER listed.
 _TR1_REPO = "ur5e_ram_gen_tr1_v2"
-_TR1_K_FT = 1  # = round(total_frames(RAM_RS_REPOS) / 3 / total_frames(_TR1_REPO)); SET BY launch_tr1ft.sh
+_TR1_K_FT = 10  # = round(total_frames(RAM_RS_REPOS) / 3 / total_frames(_TR1_REPO)); SET BY launch_tr1ft.sh
 
 
 def _ram_rs_tr1ft(name: str, **kw) -> TrainConfig:

@@ -748,6 +748,29 @@ def _ram_rs(name: str, **kw) -> TrainConfig:
         num_train_steps=120_000, keep_period=20_000, **kw)
 
 
+# --- TR1 fine-tunes: docs/plan_generalisation_2026-10-09.md sec 2.5, added 19 Oct 2026 ----------
+# Each of the seven 80k models is CONTINUED for 15,000 steps (80,000 -> 95,000) from a COPY of
+# its own step-80,000 checkpoint (params + AdamW state + schedule position: the SEAT2 precedent,
+# so the LR stays at the schedule's floor 2.5e-6). Data = the parent's union RAM_RS_REPOS plus
+# the TR1 repo (V5/V7 x slots 1/2, one stick) repeated _TR1_K_FT times (~25 % of samples, as
+# SEAT2's _SEAT2_K_FT). Norm stats = the parent's, byte for byte (assets_dir = the parent's).
+# Nothing else may differ from the parent: scripts/eval/check_tr1ft_configs.py proves it.
+# Held-out repos (ur5e_ram03_eval_v2, the seat2 eval/pilot, every ur5e_ram_gen_ho*) are NEVER listed.
+_TR1_REPO = "ur5e_ram_gen_tr1_v2"
+_TR1_K_FT = 1  # = round(total_frames(RAM_RS_REPOS) / 3 / total_frames(_TR1_REPO)); SET BY launch_tr1ft.sh
+
+
+def _ram_rs_tr1ft(name: str, **kw) -> TrainConfig:
+    """A TR1 child of a _ram_rs arm: the parent's knobs (**kw) + TR1 data + 15k more steps."""
+    return _forcevla_lora_config(
+        name=name,
+        repack_map={"image": "image", "wrist_image": "wrist_image",
+                    "state": "state", "actions": "actions", "prompt": "prompt"},
+        action_sequence_keys=("actions",),
+        repo_id=[*RAM_RS_REPOS, *((_TR1_REPO,) * _TR1_K_FT)], asset_id="ur5e_ram_rs",
+        num_train_steps=95_000, keep_period=20_000, **kw)
+
+
 # Use `get_config` if you need to get a config by name in your code.
 _CONFIGS = [
     #
@@ -1218,6 +1241,18 @@ _CONFIGS = [
     # the ForceVLA paper's "pi0 w/ F" baseline.
     _ram_rs("forcevla_ram_rs_naive", assets_dir="./assets/forcevla_ram_rs_v2", state_expert_dims=13,
             moe_readout="none"),
+    # --- TR1 fine-tunes (see _ram_rs_tr1ft above): each child = its parent's knobs, verbatim ---
+    _ram_rs_tr1ft("forcevla_ram_rs_v2_tr1ft", assets_dir="./assets/forcevla_ram_rs_v2"),
+    _ram_rs_tr1ft("forcevla_ram_rs_m7_tr1ft", assets_dir="./assets/forcevla_ram_rs_v2", state_expert_dims=13),
+    _ram_rs_tr1ft("forcevla_ram_rs_m8_tr1ft", assets_dir="./assets/forcevla_ram_rs_m8", state_expert_dims=13,
+                  future_wrench=True, wrench_loss_weight=0.1),
+    _ram_rs_tr1ft("forcevla_ram_rs_m4_tr1ft", assets_dir="./assets/forcevla_ram_rs_m4", state_expert_dims=31,
+                  history_lags=(1, 3, 6)),
+    _ram_rs_tr1ft("forcevla_ram_rs_m2a_tr1ft", assets_dir="./assets/forcevla_ram_rs_v2",
+                  moe_readout="tail_force_broadcast"),
+    _ram_rs_tr1ft("forcevla_ram_rs_pi0_tr1ft", assets_dir="./assets/forcevla_ram_rs_v2", moe_readout="none"),
+    _ram_rs_tr1ft("forcevla_ram_rs_naive_tr1ft", assets_dir="./assets/forcevla_ram_rs_v2", state_expert_dims=13,
+                  moe_readout="none"),
     # --- M1b: top-1 -> top-2 FVLMoE routing ------------------------------------
     # Byte-identical to forcevla_ram_baseline above EXCEPT moe_top_k, and it reuses
     # that config's asset_id so both models share one norm_stats.json. Both of those

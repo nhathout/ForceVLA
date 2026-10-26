@@ -771,6 +771,33 @@ def _ram_rs_tr1ft(name: str, **kw) -> TrainConfig:
         num_train_steps=95_000, keep_period=20_000, **kw)
 
 
+# --- Target-prompt fine-tunes (weekend W2): docs/plan_generalisation_2026-10-09.md sec 7, 22 Oct entries ------
+# Siblings of the TR1 fine-tunes above: the SAME data, steps, seed, init (a copy of the parent's step 80,000) and
+# norm stats, except that every repo holding insert episodes is replaced by its "_tgt" copy, whose insert prompts
+# name the pick slit ("Insert the RAM stick from slit K into slot M of the motherboard"; built by
+# scripts/data/make_target_prompt_repos.py from the recorded first-close position; frames/videos identical).
+# Remove and seat prompts are unchanged. The only free variable vs the _tr1ft child is the insert prompt text.
+# scripts/eval/check_tgtft_configs.py proves it. Held-out repos (incl. ur5e_ram03_eval_v2_tgt) are NEVER listed.
+_TGT_SUFFIX = "_tgt"
+_TGT_RELABELLED = ("ur5e_insert_ram_v2", "ur5e_ram_multi_v2", "ur5e_ram03_a_v2", "ur5e_ram03_b_v2",
+                   "ur5e_ram03_c_v2", "ur5e_ram03_d_v2", _TR1_REPO)
+
+
+def _tgt(repos) -> list[str]:
+    return [r + _TGT_SUFFIX if r in _TGT_RELABELLED else r for r in repos]
+
+
+def _ram_rs_tgtft(name: str, **kw) -> TrainConfig:
+    """A target-prompt child: its _tr1ft sibling with the insert-prompt repos swapped for their _tgt copies."""
+    return _forcevla_lora_config(
+        name=name,
+        repack_map={"image": "image", "wrist_image": "wrist_image",
+                    "state": "state", "actions": "actions", "prompt": "prompt"},
+        action_sequence_keys=("actions",),
+        repo_id=_tgt([*RAM_RS_REPOS, *((_TR1_REPO,) * _TR1_K_FT)]), asset_id="ur5e_ram_rs",
+        num_train_steps=95_000, keep_period=20_000, **kw)
+
+
 # Use `get_config` if you need to get a config by name in your code.
 _CONFIGS = [
     #
@@ -1252,6 +1279,18 @@ _CONFIGS = [
                   moe_readout="tail_force_broadcast"),
     _ram_rs_tr1ft("forcevla_ram_rs_pi0_tr1ft", assets_dir="./assets/forcevla_ram_rs_v2", moe_readout="none"),
     _ram_rs_tr1ft("forcevla_ram_rs_naive_tr1ft", assets_dir="./assets/forcevla_ram_rs_v2", state_expert_dims=13,
+                  moe_readout="none"),
+    # --- Target-prompt fine-tunes (see _ram_rs_tgtft above): each = its _tr1ft sibling's knobs, verbatim ---
+    _ram_rs_tgtft("forcevla_ram_rs_v2_tgtft", assets_dir="./assets/forcevla_ram_rs_v2"),
+    _ram_rs_tgtft("forcevla_ram_rs_m7_tgtft", assets_dir="./assets/forcevla_ram_rs_v2", state_expert_dims=13),
+    _ram_rs_tgtft("forcevla_ram_rs_m8_tgtft", assets_dir="./assets/forcevla_ram_rs_m8", state_expert_dims=13,
+                  future_wrench=True, wrench_loss_weight=0.1),
+    _ram_rs_tgtft("forcevla_ram_rs_m4_tgtft", assets_dir="./assets/forcevla_ram_rs_m4", state_expert_dims=31,
+                  history_lags=(1, 3, 6)),
+    _ram_rs_tgtft("forcevla_ram_rs_m2a_tgtft", assets_dir="./assets/forcevla_ram_rs_v2",
+                  moe_readout="tail_force_broadcast"),
+    _ram_rs_tgtft("forcevla_ram_rs_pi0_tgtft", assets_dir="./assets/forcevla_ram_rs_v2", moe_readout="none"),
+    _ram_rs_tgtft("forcevla_ram_rs_naive_tgtft", assets_dir="./assets/forcevla_ram_rs_v2", state_expert_dims=13,
                   moe_readout="none"),
     # --- M1b: top-1 -> top-2 FVLMoE routing ------------------------------------
     # Byte-identical to forcevla_ram_baseline above EXCEPT moe_top_k, and it reuses
